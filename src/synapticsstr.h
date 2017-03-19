@@ -281,6 +281,7 @@ struct _SynapticsPrivateRec {
     SynapticsMoveHistRec touch_on;      /* data when the touchpad is touched/released */
 
     enum MovingState moving_state;      /* previous moving state */
+    Bool lazy_finger_on;        /* Keeps track of the lazy finger mode on the soft button */
     Bool vert_scroll_edge_on;   /* Keeps track of currently active scroll modes */
     Bool horiz_scroll_edge_on;  /* Keeps track of currently active scroll modes */
     Bool vert_scroll_twofinger_on;      /* Keeps track of currently active scroll modes */

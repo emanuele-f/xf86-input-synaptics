@@ -1073,6 +1073,7 @@ SynapticsReset(SynapticsPrivate * priv)
     priv->tap_button_state = TBS_BUTTON_UP;
     priv->moving_state = MS_FALSE;
     priv->vert_scroll_edge_on = FALSE;
+    priv->lazy_finger_on = FALSE;
     priv->horiz_scroll_edge_on = FALSE;
     priv->vert_scroll_twofinger_on = FALSE;
     priv->horiz_scroll_twofinger_on = FALSE;
@@ -1921,7 +1922,7 @@ static void
 SetMovingState(SynapticsPrivate * priv, enum MovingState moving_state,
                CARD32 millis)
 {
-    DBG(7, "SetMovingState - %d -> %d center at %d/%d (millis:%u)\n",
+    DBG(3, "SetMovingState - %d -> %d center at %d/%d (millis:%u)\n",
         priv->moving_state, moving_state, priv->hwState->x, priv->hwState->y,
         millis);
 
@@ -1992,6 +1993,9 @@ HandleTapProcessing(SynapticsPrivate * priv, struct SynapticsHwState *hw,
     timeleft = TIME_DIFF(priv->touch_on.millis + timeout, now);
     is_timeout = timeleft <= 0;
 
+    //~ DBG(3, "HandleTapProcessing state=%d inside_active_area=%s\n", finger, inside_active_area ? "true" : "false");
+    //~ DBG(3, "READ fingers:%d %d/%d\n", hw->numFingers, hw->x, hw->y);
+
  restart:
     switch (priv->tap_state) {
     case TS_START:
@@ -2030,9 +2034,30 @@ HandleTapProcessing(SynapticsPrivate * priv, struct SynapticsHwState *hw,
             SetTapState(priv, TS_CLICKPAD_MOVE, now);
             goto restart;
         }
+
+        //~ DBG(3, "Button area: %d - %d\n", priv->last_button_area, current_button_area(para, hw->x, hw->y));
         if (release) {
             SetMovingState(priv, MS_FALSE, now);
             SetTapState(priv, TS_START, now);
+            priv->lazy_finger_on = FALSE;
+        } else if ((priv->last_button_area != NO_BUTTON_AREA) ||
+                   (priv->lazy_finger_on)) {
+            // This is *not* 2 finger scrolling
+            //~ DBG(3, "READ fingers:%d %d/%d\n", hw->numFingers, hw->x, hw->y);
+
+            // Disable scrolling
+            priv->vert_scroll_edge_on = FALSE;
+            priv->horiz_scroll_edge_on = FALSE;
+            priv->vert_scroll_twofinger_on = FALSE;
+            priv->horiz_scroll_twofinger_on = FALSE;
+
+            // Enable lazy finger
+            priv->lazy_finger_on = TRUE;
+
+            if (hw->numFingers > 1)
+                hw->numFingers--;
+
+            SetMovingState(priv, MS_TOUCHPAD_RELATIVE, now);
         }
         break;
     case TS_2A:
@@ -2240,6 +2265,14 @@ ComputeDeltas(SynapticsPrivate * priv, const struct SynapticsHwState *hw,
         }
     }
 
+    DBG(3, "fingers=%d/%d a=%d m=%d bl=%d lot=%d v=%d%d%d", priv->prevFingers, hw->numFingers,
+        inside_area, // a
+        moving_state, // m
+        priv->finger_state == FS_BLOCKED, // bl
+        priv->count_packet_finger <= 1, // lot
+        priv->vert_scroll_twofinger_on, priv->horiz_scroll_twofinger_on, priv->circ_scroll_on
+    ); 
+
     if (!inside_area || !moving_state || priv->finger_state == FS_BLOCKED ||
         priv->vert_scroll_edge_on || priv->horiz_scroll_edge_on ||
         priv->vert_scroll_twofinger_on || priv->horiz_scroll_twofinger_on ||
@@ -2261,6 +2294,7 @@ ComputeDeltas(SynapticsPrivate * priv, const struct SynapticsHwState *hw,
     if (moving_state == MS_TOUCHPAD_RELATIVE)
         get_delta(priv, hw, edge, &dx, &dy);
 
+    DBG(3, "gotcha %d x=%d,y=%d dx=%.2f,dy=%.2f ", moving_state == MS_TOUCHPAD_RELATIVE, hw->x, hw->y, dx, dy);
  out:
     priv->prevFingers = hw->numFingers;
 
@@ -2274,6 +2308,7 @@ ComputeDeltas(SynapticsPrivate * priv, const struct SynapticsHwState *hw,
 
     *dxP = dx;
     *dyP = dy;
+    DBG(3, "dx=%.2f dy=%.2f\n", dx, dy);
 
     return delay;
 }
@@ -2369,6 +2404,7 @@ static int
 HandleScrolling(SynapticsPrivate * priv, struct SynapticsHwState *hw,
                 enum EdgeType edge, Bool finger)
 {
+    //~ DBG(3, "HandleScrolling: edge=%d finger=%s\n", edge, finger ? "true" : "false");
     SynapticsParameters *para = &priv->synpara;
     int delay = 1000000000;
 
@@ -2420,7 +2456,7 @@ HandleScrolling(SynapticsPrivate * priv, struct SynapticsHwState *hw,
                     priv->vert_scroll_twofinger_on = TRUE;
                     priv->vert_scroll_edge_on = FALSE;
                     priv->scroll.last_y = hw->y;
-                    DBG(7, "vert two-finger scroll detected\n");
+                    DBG(2, "vert two-finger scroll detected\n");
                 }
                 if (!priv->horiz_scroll_twofinger_on &&
                     (para->scroll_twofinger_horiz) &&
@@ -3042,10 +3078,10 @@ HandleState(InputInfoPtr pInfo, struct SynapticsHwState *hw, CARD32 now,
 
     /* If a physical button is pressed on a clickpad or a two-finger scrolling
      * is ongoing, use cumulative relative touch movements for motion */
-    if (para->clickpad &&
-        ((priv->lastButtons & 7) ||
-        (priv->vert_scroll_twofinger_on || priv->horiz_scroll_twofinger_on)) &&
-        priv->last_button_area != TOP_BUTTON_AREA) {
+    if ( (para->clickpad &&
+           ((priv->lastButtons & 7) ||
+           (priv->vert_scroll_twofinger_on || priv->horiz_scroll_twofinger_on)) &&
+            priv->last_button_area != TOP_BUTTON_AREA) || priv->lazy_finger_on) {
         hw->x = hw->cumulative_dx;
         hw->y = hw->cumulative_dy;
         using_cumulative_coords = TRUE;
